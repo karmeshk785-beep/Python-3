@@ -1,153 +1,228 @@
-// Markdown.kt - Groq के Markdown जवाब को सुंदर रूप में दिखाना (बोल्ड, बुलेट, कोड, टेबल)
+// ChatActivity.kt - चैट + सेव चैट + फ़ॉर्मैटिंग + "Termux में चलाओ" बटन
 package com.antigem.app
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
+import android.app.Activity
+import android.app.AlertDialog
 import android.graphics.Color
 import android.graphics.Typeface
-import android.text.SpannableStringBuilder
-import android.text.Spanned
-import android.text.style.BackgroundColorSpan
-import android.text.style.ForegroundColorSpan
-import android.text.style.StyleSpan
-import android.text.style.TypefaceSpan
+import android.os.Bundle
+import android.text.InputType
+import android.text.TextUtils
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.*
+import org.json.JSONArray
+import org.json.JSONObject
 
-object Markdown {
-    private const val SP = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-    private val FENCE = "`".repeat(3)
-    private val bulRe = Regex("^[-*•]\\s+(.*)")
-    private val numRe = Regex("^(\\d+)[.)]\\s+(.*)")
-    private val sepRe = Regex(":?-{2,}:?")
+class ChatActivity : Activity() {
+    private lateinit var list: LinearLayout
+    private lateinit var scroll: ScrollView
+    private lateinit var input: EditText
+    private lateinit var chip: TextView
+    private lateinit var titleView: TextView
+    private lateinit var cur: JSONObject
+    private var chats = JSONArray()
+    private var busy = false
+    private val prefs by lazy { getSharedPreferences("antigem", 0) }
+    private fun model() = prefs.getString("model", DEFAULT_MODEL)!!
 
-    fun inline(src: String): SpannableStringBuilder {
-        val s = src.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
-        val out = SpannableStringBuilder()
-        var i = 0
-        while (i < s.length) {
-            if (s.startsWith("**", i)) {
-                val e = s.indexOf("**", i + 2)
-                if (e > 0) {
-                    val st = out.length
-                    out.append(inline(s.substring(i + 2, e)))
-                    out.setSpan(StyleSpan(Typeface.BOLD), st, out.length, SP)
-                    i = e + 2; continue
-                }
-            }
-            if (s[i] == '`') {
-                val e = s.indexOf('`', i + 1)
-                if (e > 0) {
-                    val st = out.length
-                    out.append(" " + s.substring(i + 1, e) + " ")
-                    out.setSpan(TypefaceSpan("monospace"), st, out.length, SP)
-                    out.setSpan(ForegroundColorSpan(ORANGE), st, out.length, SP)
-                    out.setSpan(BackgroundColorSpan(0xFFFDEBD3.toInt()), st, out.length, SP)
-                    i = e + 1; continue
-                }
-            }
-            out.append(s[i]); i++
+    override fun onCreate(b: Bundle?) {
+        super.onCreate(b)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(BG); setPadding(dp(8), dp(36), dp(8), dp(8)) }
+        val bar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(4), dp(8), dp(4), dp(8)) }
+        fun icon(t: String, f: () -> Unit) = TextView(this).apply {
+            text = t; textSize = 24f; setPadding(dp(12), 0, dp(12), 0); setOnClickListener { f() }
         }
-        return out
+        bar.addView(icon("☰") { showChats() })
+        titleView = TextView(this).apply {
+            textSize = 18f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.BLACK)
+            isSingleLine = true; ellipsize = TextUtils.TruncateAt.END
+        }
+        bar.addView(titleView, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        bar.addView(icon("✚") { cur = newChat(); prefs.edit().putLong("cur", cur.getLong("id")).apply(); renderAll() })
+        bar.addView(icon("⚙") { showSettings() })
+        root.addView(bar)
+        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(8)) }
+        scroll = ScrollView(this).apply { addView(list) }
+        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        chip = TextView(this).apply {
+            textSize = 13f; setTextColor(ORANGE); setPadding(dp(14), dp(6), dp(14), dp(6))
+            background = rounded(Color.WHITE, 0xFFE0E0E0.toInt(), 20); setOnClickListener { showSettings() }
+        }
+        root.addView(chip, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { setMargins(dp(8), dp(4), 0, dp(4)) })
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL; background = rounded(Color.WHITE, 0xFFE0E0E0.toInt(), 28); setPadding(dp(12), dp(4), dp(8), dp(4))
+        }
+        input = EditText(this).apply { hint = "Reply to Groq…"; background = null; maxLines = 5 }
+        row.addView(input, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        row.addView(Button(this).apply { text = "➤"; setTextColor(Color.WHITE); background = rounded(Color.BLACK, 0, 24); setOnClickListener { send() } },
+            LinearLayout.LayoutParams(dp(48), dp(48)))
+        root.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        setContentView(root)
+
+        chats = try { JSONArray(prefs.getString("chats", "[]")) } catch (e: Exception) { JSONArray() }
+        val id = prefs.getLong("cur", 0L)
+        cur = (0 until chats.length()).map { chats.getJSONObject(it) }.firstOrNull { it.getLong("id") == id } ?: newChat()
+        renderAll(); refreshChip()
     }
 
-    fun copy(c: Context, s: String) {
-        (c.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-            .setPrimaryClip(ClipData.newPlainText("antigem", s))
-        Toast.makeText(c, "Copied ✓", Toast.LENGTH_SHORT).show()
+    private fun refreshChip() { chip.text = "✦ Groq · ${model()} ⌄" }
+    private fun newChat() = JSONObject().put("id", System.currentTimeMillis()).put("title", "New chat").put("msgs", JSONArray())
+    private fun down() { scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
+
+    private fun save() {
+        val has = (0 until chats.length()).any { chats.getJSONObject(it).getLong("id") == cur.getLong("id") }
+        if (!has && cur.getJSONArray("msgs").length() > 0) chats.put(cur)
+        prefs.edit().putString("chats", chats.toString()).putLong("cur", cur.getLong("id")).apply()
     }
 
-    fun render(c: Context, text: String, box: LinearLayout) {
-        box.removeAllViews()
-        val lines = text.split("\n")
-        var i = 0
-        while (i < lines.size) {
-            val t = lines[i].trim()
-            val bm = bulRe.matchEntire(t)
-            val nm = numRe.matchEntire(t)
-            when {
-                t.startsWith(FENCE) -> {
-                    val sb = StringBuilder(); i++
-                    while (i < lines.size && !lines[i].trim().startsWith(FENCE)) { sb.append(lines[i]).append("\n"); i++ }
-                    code(c, box, sb.toString().trimEnd())
-                }
-                t.startsWith("|") -> {
-                    val rows = mutableListOf<List<String>>()
-                    while (i < lines.size && lines[i].trim().startsWith("|")) {
-                        val r = lines[i].trim().trim('|').split("|").map { it.trim() }
-                        if (!r.all { it.matches(sepRe) }) rows.add(r)
-                        i++
-                    }
-                    i--
-                    table(c, box, rows)
-                }
-                t.startsWith("#") -> {
-                    val lvl = t.takeWhile { it == '#' }.length
-                    tv(c, box, inline(t.drop(lvl).trim()), if (lvl == 1) 22f else if (lvl == 2) 20f else 18f, 14, 0, true)
-                }
-                bm != null -> {
-                    val b = SpannableStringBuilder("• ")
-                    b.setSpan(ForegroundColorSpan(ORANGE), 0, 1, SP)
-                    b.append(inline(bm.groupValues[1]))
-                    tv(c, box, b, 16f, 4, 8, false)
-                }
-                nm != null -> {
-                    val b = SpannableStringBuilder(nm.groupValues[1] + ". ")
-                    b.setSpan(ForegroundColorSpan(ORANGE), 0, b.length, SP)
-                    b.append(inline(nm.groupValues[2]))
-                    tv(c, box, b, 16f, 4, 8, false)
-                }
-                t.isEmpty() -> {}
-                else -> tv(c, box, inline(t), 16f, 6, 0, false)
+    private fun renderAll() {
+        list.removeAllViews(); titleView.text = cur.getString("title")
+        val m = cur.getJSONArray("msgs")
+        for (i in 0 until m.length()) {
+            val o = m.getJSONObject(i)
+            if (o.getString("role") == "user") user(o.getString("content")) else bot(o.getString("content"), o.optString("meta", ""))
+        }
+        down()
+    }
+
+    private fun user(text: String) {
+        val t = TextView(this).apply {
+            this.text = text.take(1500); textSize = 16f; setTextColor(Color.BLACK); setTextIsSelectable(true)
+            background = rounded(GRAY_BUBBLE, 0, 20); setPadding(dp(16), dp(12), dp(16), dp(12))
+        }
+        list.addView(t, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { bottomMargin = dp(12); gravity = Gravity.END })
+        down()
+    }
+
+    // जवाब दिखाओ + हर bash/sh कोड ब्लॉक के नीचे "Termux में चलाओ" बटन
+    private fun renderReply(box: LinearLayout, text: String) {
+        Markdown.render(this, text, box)
+        val f = "`".repeat(3)
+        Regex(f + "(\\w*)\\n([\\s\\S]*?)" + f).findAll(text).forEach { m ->
+            val lang = m.groupValues[1].lowercase()
+            val cmd = m.groupValues[2].trim()
+            if (cmd.isNotEmpty() && lang in listOf("bash", "sh", "shell", "zsh", "")) {
+                box.addView(Button(this).apply {
+                    this.text = "▶ Termux में चलाओ"; isAllCaps = false; setTextColor(Color.WHITE)
+                    background = rounded(ORANGE, 0, 20); setOnClickListener { confirmRun(cmd) }
+                }, LinearLayout.LayoutParams(WRAP_CONTENT, dp(44)).apply { topMargin = dp(8) })
             }
-            i++
         }
     }
 
-    private fun tv(c: Context, box: LinearLayout, s: CharSequence, size: Float, top: Int, left: Int, bold: Boolean) {
-        box.addView(TextView(c).apply {
-            text = s; textSize = size; setTextColor(Color.BLACK); setTextIsSelectable(true)
-            if (bold) typeface = Typeface.DEFAULT_BOLD
-            setPadding(c.dp(left), c.dp(top), 0, 0); setLineSpacing(0f, 1.15f)
-        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+    private fun confirmRun(cmd: String) {
+        AlertDialog.Builder(this).setTitle("Termux में चलाएँ?").setMessage(cmd)
+            .setPositiveButton("चलाओ ▶") { _, _ ->
+                Toast.makeText(this, "Termux में चल रहा है…", Toast.LENGTH_SHORT).show()
+                TermuxBridge.run(this, cmd) { code, out ->
+                    ask("[Termux exit=$code]\n" + out.takeLast(3000).ifBlank { "(कोई आउटपुट नहीं)" })
+                }
+            }.setNegativeButton("नहीं", null).show()
     }
 
-    private fun code(c: Context, box: LinearLayout, s: String) {
-        val w = LinearLayout(c).apply {
-            orientation = LinearLayout.VERTICAL
-            background = c.rounded(0xFF1F2430.toInt(), 0, 12)
-            setPadding(c.dp(12), c.dp(6), c.dp(12), c.dp(12))
+    private fun bot(text: String, meta: String): Pair<LinearLayout, TextView> {
+        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        renderReply(box, text)
+        val st = TextView(this).apply {
+            textSize = 12f; setTextColor(Color.GRAY); setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = rounded(0xFFEDEFF2.toInt(), 0, 10); this.text = meta; tag = text
+            visibility = if (meta.isEmpty()) View.GONE else View.VISIBLE
+            setOnClickListener { Markdown.copy(this@ChatActivity, tag as String) }
         }
-        w.addView(TextView(c).apply {
-            text = "⧉ Copy"; textSize = 12f; setTextColor(0xFFB0B7C3.toInt()); gravity = Gravity.END
-            setPadding(0, c.dp(4), 0, c.dp(6)); setOnClickListener { copy(c, s) }
-        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        w.addView(HorizontalScrollView(c).apply {
-            addView(TextView(c).apply {
-                text = s; textSize = 13f; typeface = Typeface.MONOSPACE
-                setTextColor(0xFFE6EDF3.toInt()); setTextIsSelectable(true)
-            })
-        })
-        box.addView(w, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = c.dp(8); bottomMargin = c.dp(4) })
+        wrap.addView(box)
+        wrap.addView(st, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = dp(8) })
+        list.addView(wrap, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(16) })
+        down()
+        return Pair(box, st)
     }
 
-    private fun table(c: Context, box: LinearLayout, rows: List<List<String>>) {
-        val tl = TableLayout(c)
-        rows.forEachIndexed { ri, r ->
-            val tr = TableRow(c)
-            r.forEach { cell ->
-                tr.addView(TextView(c).apply {
-                    text = inline(cell); textSize = 14f; setTextColor(Color.BLACK); maxWidth = c.dp(240)
-                    setPadding(c.dp(10), c.dp(8), c.dp(10), c.dp(8))
-                    background = c.rounded(if (ri == 0) 0xFFF1F3F5.toInt() else Color.WHITE, 0xFFDDDDDD.toInt(), 0)
-                    if (ri == 0) typeface = Typeface.DEFAULT_BOLD
-                })
+    private fun send() {
+        val text = input.text.toString().trim()
+        if (text.isEmpty()) return
+        input.setText("")
+        ask(text)
+    }
+
+    private fun ask(text: String) {
+        if (busy) { Toast.makeText(this, "जवाब आने तक रुको", Toast.LENGTH_SHORT).show(); return }
+        val key = prefs.getString("key", "") ?: ""
+        if (key.isEmpty()) { Toast.makeText(this, "पहले Settings में Groq API key डालो", Toast.LENGTH_LONG).show(); showSettings(); return }
+        val msgs = cur.getJSONArray("msgs")
+        msgs.put(JSONObject().put("role", "user").put("content", text))
+        if (msgs.length() == 1) cur.put("title", text.take(28))
+        save(); titleView.text = cur.getString("title")
+        user(text)
+        val (box, st) = bot("…", "")
+        val hist = JSONArray()
+        for (i in 0 until msgs.length()) {
+            val m = msgs.getJSONObject(i)
+            hist.put(JSONObject().put("role", m.getString("role")).put("content", m.getString("content")))
+        }
+        busy = true
+        val mdl = model(); val sys = prefs.getString("sys", DEFAULT_SYS)!! + "\n\n" + TERMUX_HINT; val t0 = System.currentTimeMillis()
+        Thread {
+            var r: Reply? = null; var err = ""
+            try { r = Groq.chat(key, mdl, sys, hist) } catch (e: Exception) { err = e.message ?: "error" }
+            val res = r
+            val sec = (System.currentTimeMillis() - t0) / 100 / 10.0
+            runOnUiThread {
+                busy = false
+                if (res != null) {
+                    val meta = "↑${res.pt}  ↓${res.ct}  ⏱ ${sec}s   ⧉ Copy"
+                    renderReply(box, res.text)
+                    st.tag = res.text; st.text = meta; st.visibility = View.VISIBLE
+                    msgs.put(JSONObject().put("role", "assistant").put("content", res.text).put("meta", meta))
+                    save()
+                } else Markdown.render(this, "⚠️ $err", box)
+                down()
             }
-            tl.addView(tr)
+        }.start()
+    }
+
+    private fun deleteChat(c: JSONObject) {
+        for (i in 0 until chats.length()) if (chats.getJSONObject(i).getLong("id") == c.getLong("id")) { chats.remove(i); break }
+        if (cur.getLong("id") == c.getLong("id")) cur = newChat()
+        save(); renderAll()
+    }
+
+    private fun showChats() {
+        val items = (chats.length() - 1 downTo 0).map { chats.getJSONObject(it) }
+        val lv = ListView(this)
+        lv.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, items.map { it.getString("title") })
+        val dlg = AlertDialog.Builder(this).setTitle("चैट्स (देर तक दबाओ = मिटाओ)").setView(lv)
+            .setPositiveButton("✚ नई चैट") { _, _ -> cur = newChat(); prefs.edit().putLong("cur", cur.getLong("id")).apply(); renderAll() }
+            .setNegativeButton("बंद", null).create()
+        lv.setOnItemClickListener { _, _, p, _ ->
+            cur = items[p]; prefs.edit().putLong("cur", cur.getLong("id")).apply(); renderAll(); dlg.dismiss()
         }
-        box.addView(HorizontalScrollView(c).apply { addView(tl) },
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = c.dp(8); bottomMargin = c.dp(8) })
+        lv.setOnItemLongClickListener { _, _, p, _ ->
+            AlertDialog.Builder(this).setMessage("यह चैट मिटाएँ?")
+                .setPositiveButton("मिटाओ") { _, _ -> deleteChat(items[p]); dlg.dismiss() }
+                .setNegativeButton("नहीं", null).show()
+            true
+        }
+        dlg.show()
+    }
+
+    private fun showSettings() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), 0) }
+        val key = EditText(this).apply { hint = "Groq API key (gsk_...)"; setText(prefs.getString("key", "")); setSingleLine() }
+        val mdl = EditText(this).apply { hint = "Model नाम"; setText(model()); setSingleLine() }
+        val sys = EditText(this).apply {
+            setText(prefs.getString("sys", DEFAULT_SYS)); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; maxLines = 4
+        }
+        box.addView(TextView(this).apply { text = "API key" }); box.addView(key)
+        box.addView(TextView(this).apply { text = "Model (जैसे llama-3.3-70b-versatile)"; setPadding(0, dp(12), 0, 0) }); box.addView(mdl)
+        box.addView(TextView(this).apply { text = "System prompt"; setPadding(0, dp(12), 0, 0) }); box.addView(sys)
+        AlertDialog.Builder(this).setTitle("Settings").setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Save") { _, _ ->
+                prefs.edit().putString("key", key.text.toString().trim())
+                    .putString("model", mdl.text.toString().trim().ifEmpty { DEFAULT_MODEL })
+                    .putString("sys", sys.text.toString().trim().ifEmpty { DEFAULT_SYS }).apply()
+                refreshChip()
+            }.setNegativeButton("Cancel", null).show()
     }
 }
