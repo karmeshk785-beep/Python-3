@@ -1,99 +1,153 @@
-// ChatActivity.kt - चैट स्क्रीन + Settings (API key और MODEL यहीं बदलो)
+// Markdown.kt - Groq के Markdown जवाब को सुंदर रूप में दिखाना (बोल्ड, बुलेट, कोड, टेबल)
 package com.antigem.app
-import android.app.Activity
-import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
-import android.os.Bundle
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.BackgroundColorSpan
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
+import android.text.style.TypefaceSpan
 import android.view.Gravity
-import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.*
-import org.json.JSONArray
-import org.json.JSONObject
 
-class ChatActivity : Activity() {
-    private val history = JSONArray()
-    private lateinit var list: LinearLayout
-    private lateinit var scroll: ScrollView
-    private lateinit var input: EditText
-    private lateinit var chip: TextView
-    private val prefs by lazy { getSharedPreferences("antigem", 0) }
-    private fun model() = prefs.getString("model", "llama-3.3-70b-versatile")!!
+object Markdown {
+    private const val SP = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+    private val FENCE = "`".repeat(3)
+    private val bulRe = Regex("^[-*•]\\s+(.*)")
+    private val numRe = Regex("^(\\d+)[.)]\\s+(.*)")
+    private val sepRe = Regex(":?-{2,}:?")
 
-    override fun onCreate(b: Bundle?) {
-        super.onCreate(b)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(BG); setPadding(dp(8), dp(36), dp(8), dp(8)) }
-        val bar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(8)) }
-        bar.addView(TextView(this).apply { text = "AntiGem"; textSize = 20f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.BLACK) },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        bar.addView(TextView(this).apply { text = "⚙"; textSize = 24f; setPadding(dp(12), 0, dp(12), 0); setOnClickListener { showSettings() } })
-        root.addView(bar)
-        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(8)) }
-        scroll = ScrollView(this).apply { addView(list) }
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-        chip = TextView(this).apply {
-            textSize = 13f; setTextColor(ORANGE); setPadding(dp(14), dp(6), dp(14), dp(6))
-            background = rounded(Color.WHITE, 0xFFE0E0E0.toInt(), 20); setOnClickListener { showSettings() }
-        }
-        root.addView(chip, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { setMargins(dp(8), dp(4), 0, dp(4)) })
-        val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; background = rounded(Color.WHITE, 0xFFE0E0E0.toInt(), 28); setPadding(dp(12), dp(4), dp(8), dp(4)) }
-        input = EditText(this).apply { hint = "Reply to Groq…"; background = null; maxLines = 5 }
-        row.addView(input, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        row.addView(Button(this).apply { text = "➤"; setTextColor(Color.WHITE); background = rounded(Color.BLACK, 0, 24); setOnClickListener { send() } },
-            LinearLayout.LayoutParams(dp(48), dp(48)))
-        root.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        setContentView(root)
-        refreshChip()
-    }
-
-    private fun refreshChip() { chip.text = "✦ Groq · ${model()} ⌄" }
-
-    private fun add(text: String, user: Boolean): TextView {
-        val t = TextView(this).apply {
-            this.text = text; textSize = 16f; setTextColor(Color.BLACK); setTextIsSelectable(true)
-            if (user) { background = rounded(GRAY_BUBBLE, 0, 20); setPadding(dp(16), dp(12), dp(16), dp(12)) }
-            else setPadding(dp(4), dp(8), dp(4), dp(8))
-        }
-        list.addView(t, LinearLayout.LayoutParams(if (user) WRAP_CONTENT else MATCH_PARENT, WRAP_CONTENT).apply {
-            bottomMargin = dp(10); if (user) gravity = Gravity.END
-        })
-        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
-        return t
-    }
-
-    private fun send() {
-        val text = input.text.toString().trim()
-        if (text.isEmpty()) return
-        val key = prefs.getString("key", "") ?: ""
-        if (key.isEmpty()) { Toast.makeText(this, "पहले Settings में Groq API key डालो", Toast.LENGTH_LONG).show(); showSettings(); return }
-        input.setText(""); add(text, true)
-        history.put(JSONObject().put("role", "user").put("content", text))
-        val reply = add("…", false)
-        val m = model()
-        Thread {
-            val r = try { Groq.chat(key, m, history) } catch (e: Exception) { "Error: ${e.message}" }
-            runOnUiThread {
-                reply.text = r
-                if (!r.startsWith("Error: ")) history.put(JSONObject().put("role", "assistant").put("content", r))
-                else history.remove(history.length() - 1)
-                scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+    fun inline(src: String): SpannableStringBuilder {
+        val s = src.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+        val out = SpannableStringBuilder()
+        var i = 0
+        while (i < s.length) {
+            if (s.startsWith("**", i)) {
+                val e = s.indexOf("**", i + 2)
+                if (e > 0) {
+                    val st = out.length
+                    out.append(inline(s.substring(i + 2, e)))
+                    out.setSpan(StyleSpan(Typeface.BOLD), st, out.length, SP)
+                    i = e + 2; continue
+                }
             }
-        }.start()
+            if (s[i] == '`') {
+                val e = s.indexOf('`', i + 1)
+                if (e > 0) {
+                    val st = out.length
+                    out.append(" " + s.substring(i + 1, e) + " ")
+                    out.setSpan(TypefaceSpan("monospace"), st, out.length, SP)
+                    out.setSpan(ForegroundColorSpan(ORANGE), st, out.length, SP)
+                    out.setSpan(BackgroundColorSpan(0xFFFDEBD3.toInt()), st, out.length, SP)
+                    i = e + 1; continue
+                }
+            }
+            out.append(s[i]); i++
+        }
+        return out
     }
 
-    private fun showSettings() {
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), 0) }
-        val key = EditText(this).apply { hint = "Groq API key (gsk_...)"; setText(prefs.getString("key", "")); setSingleLine() }
-        val mdl = EditText(this).apply { hint = "Model नाम"; setText(model()); setSingleLine() }
-        box.addView(TextView(this).apply { text = "API key" }); box.addView(key)
-        box.addView(TextView(this).apply { text = "Model (जैसे llama-3.3-70b-versatile)"; setPadding(0, dp(12), 0, 0) }); box.addView(mdl)
-        AlertDialog.Builder(this).setTitle("Settings").setView(box)
-            .setPositiveButton("Save") { _, _ ->
-                prefs.edit().putString("key", key.text.toString().trim())
-                    .putString("model", mdl.text.toString().trim().ifEmpty { "llama-3.3-70b-versatile" }).apply()
-                refreshChip()
-            }.setNegativeButton("Cancel", null).show()
+    fun copy(c: Context, s: String) {
+        (c.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+            .setPrimaryClip(ClipData.newPlainText("antigem", s))
+        Toast.makeText(c, "Copied ✓", Toast.LENGTH_SHORT).show()
+    }
+
+    fun render(c: Context, text: String, box: LinearLayout) {
+        box.removeAllViews()
+        val lines = text.split("\n")
+        var i = 0
+        while (i < lines.size) {
+            val t = lines[i].trim()
+            val bm = bulRe.matchEntire(t)
+            val nm = numRe.matchEntire(t)
+            when {
+                t.startsWith(FENCE) -> {
+                    val sb = StringBuilder(); i++
+                    while (i < lines.size && !lines[i].trim().startsWith(FENCE)) { sb.append(lines[i]).append("\n"); i++ }
+                    code(c, box, sb.toString().trimEnd())
+                }
+                t.startsWith("|") -> {
+                    val rows = mutableListOf<List<String>>()
+                    while (i < lines.size && lines[i].trim().startsWith("|")) {
+                        val r = lines[i].trim().trim('|').split("|").map { it.trim() }
+                        if (!r.all { it.matches(sepRe) }) rows.add(r)
+                        i++
+                    }
+                    i--
+                    table(c, box, rows)
+                }
+                t.startsWith("#") -> {
+                    val lvl = t.takeWhile { it == '#' }.length
+                    tv(c, box, inline(t.drop(lvl).trim()), if (lvl == 1) 22f else if (lvl == 2) 20f else 18f, 14, 0, true)
+                }
+                bm != null -> {
+                    val b = SpannableStringBuilder("• ")
+                    b.setSpan(ForegroundColorSpan(ORANGE), 0, 1, SP)
+                    b.append(inline(bm.groupValues[1]))
+                    tv(c, box, b, 16f, 4, 8, false)
+                }
+                nm != null -> {
+                    val b = SpannableStringBuilder(nm.groupValues[1] + ". ")
+                    b.setSpan(ForegroundColorSpan(ORANGE), 0, b.length, SP)
+                    b.append(inline(nm.groupValues[2]))
+                    tv(c, box, b, 16f, 4, 8, false)
+                }
+                t.isEmpty() -> {}
+                else -> tv(c, box, inline(t), 16f, 6, 0, false)
+            }
+            i++
+        }
+    }
+
+    private fun tv(c: Context, box: LinearLayout, s: CharSequence, size: Float, top: Int, left: Int, bold: Boolean) {
+        box.addView(TextView(c).apply {
+            text = s; textSize = size; setTextColor(Color.BLACK); setTextIsSelectable(true)
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+            setPadding(c.dp(left), c.dp(top), 0, 0); setLineSpacing(0f, 1.15f)
+        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+    }
+
+    private fun code(c: Context, box: LinearLayout, s: String) {
+        val w = LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            background = c.rounded(0xFF1F2430.toInt(), 0, 12)
+            setPadding(c.dp(12), c.dp(6), c.dp(12), c.dp(12))
+        }
+        w.addView(TextView(c).apply {
+            text = "⧉ Copy"; textSize = 12f; setTextColor(0xFFB0B7C3.toInt()); gravity = Gravity.END
+            setPadding(0, c.dp(4), 0, c.dp(6)); setOnClickListener { copy(c, s) }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        w.addView(HorizontalScrollView(c).apply {
+            addView(TextView(c).apply {
+                text = s; textSize = 13f; typeface = Typeface.MONOSPACE
+                setTextColor(0xFFE6EDF3.toInt()); setTextIsSelectable(true)
+            })
+        })
+        box.addView(w, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = c.dp(8); bottomMargin = c.dp(4) })
+    }
+
+    private fun table(c: Context, box: LinearLayout, rows: List<List<String>>) {
+        val tl = TableLayout(c)
+        rows.forEachIndexed { ri, r ->
+            val tr = TableRow(c)
+            r.forEach { cell ->
+                tr.addView(TextView(c).apply {
+                    text = inline(cell); textSize = 14f; setTextColor(Color.BLACK); maxWidth = c.dp(240)
+                    setPadding(c.dp(10), c.dp(8), c.dp(10), c.dp(8))
+                    background = c.rounded(if (ri == 0) 0xFFF1F3F5.toInt() else Color.WHITE, 0xFFDDDDDD.toInt(), 0)
+                    if (ri == 0) typeface = Typeface.DEFAULT_BOLD
+                })
+            }
+            tl.addView(tr)
+        }
+        box.addView(HorizontalScrollView(c).apply { addView(tl) },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = c.dp(8); bottomMargin = c.dp(8) })
     }
 }
